@@ -88,7 +88,7 @@ struct Record {
   uint8_t remainingRecords;
 };
 
-typedef std::variant<Info, Params, Record> Message;
+typedef std::variant<std::monostate, Info, Params, Record> Message;
 
 Message parseMessage(const QByteArray& m);
 }
