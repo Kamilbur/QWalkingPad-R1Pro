@@ -1,0 +1,113 @@
+name: Build and publish QWalkingPad AppImage
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    name: Linux x86_64 AppImage
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out tagged source (including submodule)
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ curl file \
+            qmake6 qt6-base-dev qt6-connectivity-dev qt6-wayland \
+            libfuse2t64 libxkbcommon-dev
+
+      - name: Initialize SingleApplication submodule
+        run: |
+          git config -f .gitmodules \
+            submodule.singleapplication.url \
+            https://github.com/itay-grudev/SingleApplication.git
+
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+          test -f singleapplication/CMakeLists.txt || {
+            echo "::error::SingleApplication submodule missing"
+            exit 1
+          }
+
+      - name: Build QWalkingPad
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+          test -x build/qwalkinkpad2
+
+      - name: Create desktop file and icon
+        run: |
+          mkdir -p packaging
+          cat > packaging/qwalkinkpad2.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=QWalkingPad
+          Comment=Local Bluetooth WalkingPad controller
+          Exec=qwalkinkpad2
+          Icon=qwalkinkpad2
+          Terminal=false
+          Categories=Utility;
+          EOF
+          cat > packaging/qwalkinkpad2.svg <<'EOF'
+          <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+            <rect width="128" height="128" rx="20" fill="#253147"/>
+            <rect x="18" y="70" width="92" height="27" rx="13" fill="#99b9d8"/>
+            <path d="M30 84h68" stroke="#253147" stroke-width="4" stroke-linecap="round"/>
+            <circle cx="64" cy="34" r="9" fill="white"/>
+            <path d="M64 46L56 61L74 70M64 48L82 60M56 61L42 74" fill="none" stroke="white" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          EOF
+
+      - name: Download linuxdeploy and Qt plugin
+        run: |
+          mkdir -p tools
+          curl --fail --location --retry 3 \
+            --output tools/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage
+          curl --fail --location --retry 3 \
+            --output tools/linuxdeploy-plugin-qt-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x tools/*.AppImage
+
+      - name: Bundle AppImage (including Qt Bluetooth and desktop plugins)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          EXTRA_PLATFORM_PLUGINS: 'libqwayland-egl.so;libqwayland-generic.so'
+        run: |
+          export QMAKE="$(command -v qmake6)"
+          export LDAI_OUTPUT="QWalkingPad-${GITHUB_REF_NAME}-x86_64.AppImage"
+
+          ./tools/linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --executable build/qwalkinkpad2 \
+            --desktop-file packaging/qwalkinkpad2.desktop \
+            --icon-file packaging/qwalkinkpad2.svg \
+            --plugin qt \
+            --output appimage
+
+          test -s "$LDAI_OUTPUT"
+          file "$LDAI_OUTPUT"
+          sha256sum "$LDAI_OUTPUT" > "$LDAI_OUTPUT.sha256"
+
+      - name: Attach AppImage to GitHub Release
+        if: ${{ !env.ACT }}
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            QWalkingPad-*.AppImage
+            QWalkingPad-*.AppImage.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
