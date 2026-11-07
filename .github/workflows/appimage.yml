@@ -82,24 +82,78 @@ jobs:
             https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x tools/*.AppImage
 
-      - name: Bundle AppImage (including Qt Bluetooth and desktop plugins)
+      - name: Prepare AppDir with Qt and Bluetooth dependencies
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
           EXTRA_PLATFORM_PLUGINS: 'libqwayland-egl.so;libqwayland-generic.so'
         run: |
           export QMAKE="$(command -v qmake6)"
-          export LDAI_OUTPUT="QWalkingPad-${GITHUB_REF_NAME}-x86_64.AppImage"
-
           ./tools/linuxdeploy-x86_64.AppImage \
             --appdir AppDir \
             --executable build/qwalkinkpad2 \
             --desktop-file packaging/qwalkinkpad2.desktop \
             --icon-file packaging/qwalkinkpad2.svg \
-            --plugin qt \
+            --plugin qt
+
+      - name: Bundle missing Qt Wayland shell and EGL integrations
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          set -euo pipefail
+          QT_PLUGINS="$(qmake6 -query QT_INSTALL_PLUGINS)"
+          echo "Qt plugins directory: $QT_PLUGINS"
+
+          # linuxdeploy's Qt plugin bundles the Wayland *platform* plugins,
+          # but the runtime also needs xdg-shell and EGL integration plugins.
+          # Use the plugins from the same Qt installation as the build.
+          declare -a EXTRA_QT_PLUGINS=(
+            "wayland-shell-integration/libxdg-shell.so"
+            "wayland-graphics-integration-client/libqt-plugin-wayland-egl.so"
+          )
+          for relative in "${EXTRA_QT_PLUGINS[@]}"; do
+            source="$QT_PLUGINS/$relative"
+            test -f "$source" || {
+              echo "::error::Missing Qt Wayland plugin: $source"
+              exit 1
+            }
+            install -D -m 755 "$source" "AppDir/usr/plugins/$relative"
+          done
+
+          # Let linuxdeploy gather library dependencies of these dynamically
+          # loaded plugins; simply copying the .so files isn't sufficient.
+          ./tools/linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --library "$QT_PLUGINS/wayland-shell-integration/libxdg-shell.so" \
+            --library "$QT_PLUGINS/wayland-graphics-integration-client/libqt-plugin-wayland-egl.so"
+
+          # Fail the build if the critical plugins are absent from the AppDir.
+          test -f AppDir/usr/plugins/wayland-shell-integration/libxdg-shell.so
+          test -f AppDir/usr/plugins/wayland-graphics-integration-client/libqt-plugin-wayland-egl.so
+          echo 'Included Wayland plugins:'
+          find AppDir/usr/plugins -path '*wayland*' -type f -print
+
+      - name: Create AppImage and SHA256 checksum
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          export LDAI_OUTPUT="QWalkingPad-${GITHUB_REF_NAME}-x86_64.AppImage"
+          ./tools/linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
             --output appimage
 
           test -s "$LDAI_OUTPUT"
           file "$LDAI_OUTPUT"
+
+          # Verify the final AppImage (not just the staging AppDir) includes
+          # the native Wayland integration plugins and the matching Qt client.
+          rm -rf squashfs-root
+          "./$LDAI_OUTPUT" --appimage-extract >/dev/null
+          test -f squashfs-root/usr/plugins/platforms/libqwayland-generic.so
+          test -f squashfs-root/usr/plugins/wayland-shell-integration/libxdg-shell.so
+          test -f squashfs-root/usr/plugins/wayland-graphics-integration-client/libqt-plugin-wayland-egl.so
+          find squashfs-root/usr/lib -maxdepth 1 -name 'libQt6WaylandClient.so*' | grep -q .
+          rm -rf squashfs-root
+
           sha256sum "$LDAI_OUTPUT" > "$LDAI_OUTPUT.sha256"
 
       - name: Attach AppImage to GitHub Release
@@ -111,3 +165,4 @@ jobs:
             QWalkingPad-*.AppImage.sha256
           fail_on_unmatched_files: true
           generate_release_notes: true
+
